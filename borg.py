@@ -12,7 +12,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import subprocess
 import sys
 
-# ---------------- LOGO ----------------
 logo = """
  ____   ___  ____   ____   _      __        __    _       _     _             
 | __ ) / _ \\|  _ \\ / ___| (_)___  \\ \\      / /_ _| |_ ___| |__ (_)_ __   __ _ 
@@ -160,7 +159,7 @@ def ping_sweep(hosts):
     print(f"[+] Alive hosts: {len(alive)}\n")
     return alive
 
-# ---------------- TLS CERT ----------------
+# ---------------- TLS-CERT ----------------
 def get_tls_cert(ip):
     try:
         ctx = ssl.create_default_context()
@@ -312,7 +311,7 @@ def main(target, fast, combined):
             json.dump(output, f, indent=2)
         print(f"[+] Combined results saved to {fname}")
 
-# ---------------- ENTRY ----------------
+# ---------------- Prelude ----------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Advanced TCP/UDP Scanner")
     parser.add_argument("host", help="Target IP / domain / subnet")
