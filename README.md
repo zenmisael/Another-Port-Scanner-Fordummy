@@ -1,14 +1,25 @@
 # Port-Scanner-Fordummy
-Another Port scanner single IP and CIDR :
-✅ TCP + UDP scanner
-✅ Ping sweep/ Host detection
-✅ Banner grabbing
-✅ Progress bar
-✅ Clean JSON export 
+Another Port scanner single IP and CIDR :  
 
-🚀 Usage 
-Fast subnet scan:
+✅ TCP + UDP scanner  
+
+✅ Ping sweep/ Host detection  
+
+✅ Banner grabbing  
+
+✅ Progress bar  
+
+✅ Clean JSON export  
+
+##
+# 🚀 Usage 
+Fast subnet scan:  
+```bash
 python3 borg.py 192.168.1.0/24 --fast --combined
+```
 
-Full TCP + UDP scan:
+
+Full TCP + UDP scan:  
+```bash
 python3 borg.py 192.168.1.10
+```
