@@ -1,2 +1,2 @@
 # Port-Scanner-Fordummy
-Port scanner 
+Another Port scanner single IP and CIDR 
