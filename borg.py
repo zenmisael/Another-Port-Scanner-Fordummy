@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import socket
+import ssl
 import time
 from datetime import timedelta
 import json
@@ -22,6 +23,8 @@ logo = """
 MADE By BORG
 """
 print(logo)
+
+lock = threading.Lock()
 
 # ---------------- PORTS ----------------
 COMMON_PORTS = {
@@ -111,55 +114,91 @@ COMMON_PORTS = {
     50030: "Hadoop",
     50070: "Hadoop NameNode",
 }
+UDP_FAST = [53, 123, 161]
+UDP_FULL = [53, 67, 68, 69, 123, 161, 500, 514]
 
-UDP_PORTS_FAST = [53, 123, 161]
-UDP_PORTS_FULL = [53, 67, 68, 69, 123, 161, 500, 514]
+# ---------------- PING & OS FP ----------------
+def ping_ttl(ip):
+    try:
+        if platform.system().lower() == "windows":
+            cmd = ["ping", "-n", "1", ip]
+        else:
+            cmd = ["ping", "-c", "1", ip]
+        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode()
+        for line in out.splitlines():
+            if "ttl=" in line.lower():
+                return int(line.lower().split("ttl=")[1].split()[0])
+    except:
+        pass
+    return None
 
-lock = threading.Lock()
+def os_fingerprint(ip):
+    ttl = ping_ttl(ip)
+    if ttl is None:
+        return "Unknown"
+    if ttl <= 64:
+        return "Linux / Unix"
+    elif ttl <= 128:
+        return "Windows"
+    else:
+        return "Network Device"
 
-# ---------------- PING SWEEP ----------------
 def is_host_alive(ip):
-    param = "-n" if platform.system().lower() == "windows" else "-c"
-    cmd = ["ping", param, "1", "-W", "1", ip] if platform.system().lower() != "windows" else ["ping", param, "1", ip]
-    return subprocess.call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+    try:
+        return ping_ttl(ip) is not None
+    except:
+        return False
 
 def ping_sweep(hosts):
     print("[*] Performing ping sweep...")
     alive = []
-    with ThreadPoolExecutor(max_workers=100) as executor:
-        futures = {executor.submit(is_host_alive, h): h for h in hosts}
+    with ThreadPoolExecutor(max_workers=100) as ex:
+        futures = {ex.submit(is_host_alive, h): h for h in hosts}
         for f in as_completed(futures):
             if f.result():
                 alive.append(futures[f])
     print(f"[+] Alive hosts: {len(alive)}\n")
     return alive
 
-# ---------------- TCP BANNER ----------------
+# ---------------- TLS CERT ----------------
+def get_tls_cert(ip):
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((ip, 443), timeout=2) as sock:
+            with ctx.wrap_socket(sock, server_hostname=ip) as ss:
+                cert = ss.getpeercert()
+        return {
+            "subject": dict(x[0] for x in cert["subject"]),
+            "issuer": dict(x[0] for x in cert["issuer"]),
+            "valid_from": cert["notBefore"],
+            "valid_to": cert["notAfter"]
+        }
+    except:
+        return None
+
+# ---------------- BANNERS ----------------
 def grab_tcp_banner(ip, port):
     try:
         with socket.socket() as s:
             s.settimeout(1)
             s.connect((ip, port))
-            if port in (80, 8080, 443):
+            if port in (80, 443, 8080):
                 s.send(b"HEAD / HTTP/1.0\r\n\r\n")
             data = s.recv(1024).decode(errors="ignore").strip()
             return data if data else None
     except:
         return None
 
-# ---------------- UDP PROBE ----------------
 def grab_udp_banner(ip, port):
     probes = {
-        53: b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03www\x06google\x03com\x00\x00\x01\x00\x01",
+        53: b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00",
         123: b"\x1b" + 47 * b"\0",
-        161: b"\x30\x26\x02\x01\x01\x04\x06public\xa0\x19\x02\x04\x71\x71\x71\x71\x02\x01\x00\x02\x01\x00\x30\x0b\x30\x09\x06\x05\x2b\x06\x01\x02\x01\x05\x00"
+        161: b"\x30\x26\x02\x01\x01\x04\x06public"
     }
-
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.settimeout(2)
-            payload = probes.get(port, b"\x00")
-            s.sendto(payload, (ip, port))
+            s.sendto(probes.get(port, b"\x00"), (ip, port))
             data, _ = s.recvfrom(1024)
             return data.hex()[:80]
     except:
@@ -179,7 +218,7 @@ def progress_bar(done, total, start):
         )
         sys.stdout.flush()
 
-# ---------------- TCP SCAN ----------------
+# ---------------- SCANS ----------------
 def scan_tcp(ip, port):
     try:
         with socket.socket() as s:
@@ -195,7 +234,6 @@ def scan_tcp(ip, port):
         pass
     return None
 
-# ---------------- UDP SCAN ----------------
 def scan_udp(ip, port):
     banner = grab_udp_banner(ip, port)
     if banner:
@@ -209,11 +247,13 @@ def scan_udp(ip, port):
 
 # ---------------- HOST SCAN ----------------
 def scan_host(ip, fast):
-    print(f"[+] Scanning host: {ip}")
+    print(f"[+] Scanning {ip}")
+    os_guess = os_fingerprint(ip)
+    print(f"[OS] {os_guess}")
     print("{:<15} {:<5} {:<6} {:<12} {}".format("IP", "PROTO", "PORT", "SERVICE", "BANNER"))
 
     tcp_ports = list(COMMON_PORTS.keys()) if fast else range(1, 65536)
-    udp_ports = UDP_PORTS_FAST if fast else UDP_PORTS_FULL
+    udp_ports = UDP_FAST if fast else UDP_FULL
 
     tasks = []
     results = []
@@ -238,8 +278,17 @@ def scan_host(ip, fast):
                     print(f"{ip:<15} {res['protocol']:<5} {res['port']:<6} {res['service']:<12} {banner}")
             progress_bar(done, total, start)
 
+    # TLS parsing
+    if any(r["protocol"] == "tcp" and r["port"] == 443 for r in results):
+        cert = get_tls_cert(ip)
+        if cert:
+            results.append({"tls_certificate": cert})
+
     print("\n")
-    return results
+    return {
+        "os": os_guess,
+        "services": results
+    }
 
 # ---------------- MAIN ----------------
 def main(target, fast, combined):
@@ -265,10 +314,10 @@ def main(target, fast, combined):
 
 # ---------------- ENTRY ----------------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="TCP + UDP Scanner with Ping Sweep")
+    parser = argparse.ArgumentParser(description="Advanced TCP/UDP Scanner")
     parser.add_argument("host", help="Target IP / domain / subnet")
     parser.add_argument("--fast", action="store_true", help="Fast scan")
     parser.add_argument("--combined", action="store_true", help="Single JSON output")
-
     args = parser.parse_args()
+
     main(args.host, args.fast, args.combined)
