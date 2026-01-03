@@ -23,6 +23,7 @@ MADE By BORG
 """
 print(logo)
 
+# ---------------- PORTS ----------------
 COMMON_PORTS = {
     7: "Echo",
     20: "FTP Data",
@@ -111,102 +112,130 @@ COMMON_PORTS = {
     50070: "Hadoop NameNode",
 }
 
+UDP_PORTS_FAST = [53, 123, 161]
+UDP_PORTS_FULL = [53, 67, 68, 69, 123, 161, 500, 514]
+
 lock = threading.Lock()
 
 # ---------------- PING SWEEP ----------------
 def is_host_alive(ip):
     param = "-n" if platform.system().lower() == "windows" else "-c"
     cmd = ["ping", param, "1", "-W", "1", ip] if platform.system().lower() != "windows" else ["ping", param, "1", ip]
-    try:
-        return subprocess.call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
-    except:
-        return False
+    return subprocess.call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
 
 def ping_sweep(hosts):
     print("[*] Performing ping sweep...")
     alive = []
-
     with ThreadPoolExecutor(max_workers=100) as executor:
         futures = {executor.submit(is_host_alive, h): h for h in hosts}
         for f in as_completed(futures):
             if f.result():
                 alive.append(futures[f])
-
     print(f"[+] Alive hosts: {len(alive)}\n")
     return alive
 
-# ---------------- BANNER GRAB ----------------
-def grab_banner(ip, port):
+# ---------------- TCP BANNER ----------------
+def grab_tcp_banner(ip, port):
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        with socket.socket() as s:
             s.settimeout(1)
             s.connect((ip, port))
-
             if port in (80, 8080, 443):
                 s.send(b"HEAD / HTTP/1.0\r\n\r\n")
-
-            banner = s.recv(1024).decode(errors="ignore").strip()
-            return banner if banner else None
+            data = s.recv(1024).decode(errors="ignore").strip()
+            return data if data else None
     except:
         return None
 
-# ---------------- PROGRESS BAR ----------------
+# ---------------- UDP PROBE ----------------
+def grab_udp_banner(ip, port):
+    probes = {
+        53: b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03www\x06google\x03com\x00\x00\x01\x00\x01",
+        123: b"\x1b" + 47 * b"\0",
+        161: b"\x30\x26\x02\x01\x01\x04\x06public\xa0\x19\x02\x04\x71\x71\x71\x71\x02\x01\x00\x02\x01\x00\x30\x0b\x30\x09\x06\x05\x2b\x06\x01\x02\x01\x05\x00"
+    }
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(2)
+            payload = probes.get(port, b"\x00")
+            s.sendto(payload, (ip, port))
+            data, _ = s.recvfrom(1024)
+            return data.hex()[:80]
+    except:
+        return None
+
+# ---------------- PROGRESS ----------------
 def progress_bar(done, total, start):
     percent = done / total
     bar_len = 30
     filled = int(bar_len * percent)
     bar = "█" * filled + "-" * (bar_len - filled)
-
     elapsed = time.time() - start
     eta = (elapsed / done) * (total - done) if done else 0
-
     with lock:
         sys.stdout.write(
             f"\r[{bar}] {percent*100:5.1f}% | {done}/{total} | ETA {timedelta(seconds=int(eta))}"
         )
         sys.stdout.flush()
 
-# ---------------- PORT SCAN ----------------
-def scan_port(ip, port):
+# ---------------- TCP SCAN ----------------
+def scan_tcp(ip, port):
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(0.3)
-            if sock.connect_ex((ip, port)) == 0:
-                banner = grab_banner(ip, port)
+        with socket.socket() as s:
+            s.settimeout(0.3)
+            if s.connect_ex((ip, port)) == 0:
                 return {
+                    "protocol": "tcp",
                     "port": port,
                     "service": COMMON_PORTS.get(port, "Unknown"),
-                    "banner": banner
+                    "banner": grab_tcp_banner(ip, port)
                 }
     except:
         pass
     return None
 
-# ---------------- HOST SCAN ----------------
-def scan_host(ip, ports, fast):
-    print(f"[+] Scanning host: {ip}")
-    print("{:<15} {:<6} {:<12} {}".format("IP", "PORT", "SERVICE", "BANNER"))
+# ---------------- UDP SCAN ----------------
+def scan_udp(ip, port):
+    banner = grab_udp_banner(ip, port)
+    if banner:
+        return {
+            "protocol": "udp",
+            "port": port,
+            "service": COMMON_PORTS.get(port, "Unknown"),
+            "banner": banner
+        }
+    return None
 
+# ---------------- HOST SCAN ----------------
+def scan_host(ip, fast):
+    print(f"[+] Scanning host: {ip}")
+    print("{:<15} {:<5} {:<6} {:<12} {}".format("IP", "PROTO", "PORT", "SERVICE", "BANNER"))
+
+    tcp_ports = list(COMMON_PORTS.keys()) if fast else range(1, 65536)
+    udp_ports = UDP_PORTS_FAST if fast else UDP_PORTS_FULL
+
+    tasks = []
     results = []
     start = time.time()
-    done = 0
-    total = len(ports)
 
-    workers = 300 if fast else 150
+    with ThreadPoolExecutor(max_workers=300 if fast else 150) as ex:
+        for p in tcp_ports:
+            tasks.append(ex.submit(scan_tcp, ip, p))
+        for p in udp_ports:
+            tasks.append(ex.submit(scan_udp, ip, p))
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(scan_port, ip, p) for p in ports]
+        total = len(tasks)
+        done = 0
 
-        for f in as_completed(futures):
+        for f in as_completed(tasks):
             res = f.result()
             done += 1
-
             if res:
                 with lock:
                     results.append(res)
                     banner = res["banner"][:60] if res["banner"] else ""
-                    print(f"{ip:<15} {res['port']:<6} {res['service']:<12} {banner}")
-
+                    print(f"{ip:<15} {res['protocol']:<5} {res['port']:<6} {res['service']:<12} {banner}")
             progress_bar(done, total, start)
 
     print("\n")
@@ -215,37 +244,30 @@ def scan_host(ip, ports, fast):
 # ---------------- MAIN ----------------
 def main(target, fast, combined):
     try:
-        network = ipaddress.ip_network(target, strict=False)
-        hosts = [str(h) for h in network.hosts()]
-        print(f"[+] Subnet detected: {network}")
-        hosts = ping_sweep(hosts)
+        net = ipaddress.ip_network(target, strict=False)
+        hosts = ping_sweep([str(h) for h in net.hosts()])
     except ValueError:
         hosts = [socket.gethostbyname(target)]
 
-    ports = list(COMMON_PORTS.keys()) if fast else list(range(1, 65536))
     output = {}
 
     for host in hosts:
-        result = scan_host(host, ports, fast)
-        output[host] = result
-
+        output[host] = scan_host(host, fast)
         if not combined:
             with open(f"{host}.json", "w") as f:
-                json.dump(result, f, indent=2)
+                json.dump(output[host], f, indent=2)
 
     if combined:
-        filename = f"subnet_{target.replace('/', '_')}.json"
-        with open(filename, "w") as f:
+        fname = f"subnet_{target.replace('/', '_')}.json"
+        with open(fname, "w") as f:
             json.dump(output, f, indent=2)
-        print(f"[+] Combined results saved to {filename}")
+        print(f"[+] Combined results saved to {fname}")
 
 # ---------------- ENTRY ----------------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Advanced TCP Scanner (Ping Sweep + Banner Grabbing)"
-    )
-    parser.add_argument("host", help="Target IP, domain, or subnet (CIDR)")
-    parser.add_argument("--fast", action="store_true", help="Fast scan (common ports only)")
+    parser = argparse.ArgumentParser(description="TCP + UDP Scanner with Ping Sweep")
+    parser.add_argument("host", help="Target IP / domain / subnet")
+    parser.add_argument("--fast", action="store_true", help="Fast scan")
     parser.add_argument("--combined", action="store_true", help="Single JSON output")
 
     args = parser.parse_args()
